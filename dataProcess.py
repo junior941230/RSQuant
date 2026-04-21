@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+import numba
 
 
 def calc_weighted_score(close: np.ndarray) -> np.ndarray:
@@ -33,6 +34,7 @@ def calc_weighted_score(close: np.ndarray) -> np.ndarray:
 
 def calculate_delta_rs(rs, window: int = 10) -> np.ndarray:
     """
+    向量化滾動 OLS 斜率
     用 rolling 線性回歸斜率計算 ΔRS（單一股票的 rs_rating 序列）
 
     Parameters
@@ -44,22 +46,23 @@ def calculate_delta_rs(rs, window: int = 10) -> np.ndarray:
     -------
     slopes : 與 rs 等長的 np.ndarray，前 window-1 筆為 NaN
     """
-    n = len(rs)
-    slopes = np.full(n, np.nan, dtype=np.float32)
+    s = pd.Series(rs, dtype=np.float32)
+    x = np.arange(window, dtype=np.float32)
+    x_mean = x.mean()
+    x_var = ((x - x_mean) ** 2).sum()
 
-    # 預先建好 X，避免迴圈內重複建立
-    X = np.arange(window, dtype=np.float32)
-    X_mean = X.mean()
-    X_var = ((X - X_mean) ** 2).sum()   # Σ(x - x̄)²
-
-    for i in range(window - 1, n):
-        y = rs[i - window + 1: i + 1]
-        if np.isnan(y).any():
-            continue
-        # OLS 斜率 = Σ(x-x̄)(y-ȳ) / Σ(x-x̄)²
-        slopes[i] = ((X - X_mean) * (y - y.mean())).sum() / X_var
-
-    return slopes
+    # rolling covariance with x = rolling_mean(x*y) - x_mean * rolling_mean(y)
+    # 但更直接的方式：用 rolling sum
+    y_roll_sum = s.rolling(window, min_periods=window).sum()
+    # Σ(x_i * y_i) = Σ(i * y_{t-window+1+i}) for i in 0..window-1
+    # 等價於 weighted rolling sum
+    weights = np.arange(window, dtype=np.float32)
+    xy_roll = s.rolling(window, min_periods=window).apply(
+        lambda y: (weights * y).sum(), raw=True
+    )
+    y_mean_roll = y_roll_sum / window
+    slopes = (xy_roll - x_mean * y_roll_sum) / x_var
+    return slopes.to_numpy(dtype=np.float32)
 
 
 def calc_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> np.ndarray:
@@ -131,6 +134,47 @@ def build_features(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict
     }
 
 
+@numba.njit
+def _label_core(open_arr, high_arr, low_arr, atr_arr,
+                k, max_hold_days):
+    n = len(open_arr)
+    labels = np.full(n, -128, dtype=np.int8)  # -128 = NaN sentinel
+
+    for i in range(n - max_hold_days - 1):
+        entry = open_arr[i + 1]
+        atr_val = atr_arr[i + 1]
+        if np.isnan(entry) or np.isnan(atr_val) or atr_val <= 0:
+            continue
+
+        R = k * atr_val
+        target = entry + 2.0 * R
+        stop_loss = entry - R
+        label = 0
+
+        for j in range(1, max_hold_days + 1):
+            idx = i + 1 + j
+            h = high_arr[idx]
+            l = low_arr[idx]
+            if np.isnan(h) or np.isnan(l):
+                continue
+
+            hit_tp = h >= target
+            hit_sl = l <= stop_loss
+
+            if hit_tp and hit_sl:
+                label = -1
+                break
+            elif hit_tp:
+                label = 1
+                break
+            elif hit_sl:
+                label = -1
+                break
+
+        labels[i] = label
+    return labels
+
+
 def label_sample(df: pd.DataFrame, k: float = 1.0, max_hold_days: int = 63) -> pd.DataFrame:
     """
     對 df 的每一行（每個交易日），以「隔天開盤」作為進場價，
@@ -148,44 +192,44 @@ def label_sample(df: pd.DataFrame, k: float = 1.0, max_hold_days: int = 63) -> p
     """
     n = len(df)
     open_arr = df["open"].to_numpy(dtype=np.float32)
-    close_arr = df["close"].to_numpy(dtype=np.float32)
     high_arr = df["max"].to_numpy(dtype=np.float32)
     low_arr = df["min"].to_numpy(dtype=np.float32)
     atr_arr = df["atr"].to_numpy(dtype=np.float32)
+    labels = _label_core(open_arr, high_arr, low_arr,
+                         atr_arr, k, max_hold_days)
+    # labels = np.full(n, np.nan, dtype=object)  # 預設 NaN（不足未來資料的行）
 
-    labels = np.full(n, np.nan, dtype=object)  # 預設 NaN（不足未來資料的行）
+    # # 最後 (max_hold_days + 1) 筆無法完整往前看，跳過
+    # # i     = 訊號日（當天收盤後決定是否進場）
+    # # i+1   = 進場日（隔天開盤進場）
+    # # i+1 ~ i+max_hold_days = 持有期間
+    # for i in range(n - max_hold_days - 1):
+    #     entry_price = open_arr[i + 1]
+    #     atr_val = atr_arr[i + 1]
 
-    # 最後 (max_hold_days + 1) 筆無法完整往前看，跳過
-    # i     = 訊號日（當天收盤後決定是否進場）
-    # i+1   = 進場日（隔天開盤進場）
-    # i+1 ~ i+max_hold_days = 持有期間
-    for i in range(n - max_hold_days - 1):
-        entry_price = open_arr[i + 1]
-        atr_val = atr_arr[i + 1]
+    #     # ATR 或進場價為 NaN 時跳過
+    #     if np.isnan(entry_price) or np.isnan(atr_val) or atr_val <= 0:
+    #         continue
 
-        # ATR 或進場價為 NaN 時跳過
-        if np.isnan(entry_price) or np.isnan(atr_val) or atr_val <= 0:
-            continue
+    #     R = k * atr_val
+    #     target = entry_price + 2.0 * R
+    #     stop_loss = entry_price - R
 
-        R = k * atr_val
-        target = entry_price + 2.0 * R
-        stop_loss = entry_price - R
+    #     label = 0  # 預設：超過持有期，視為中性
 
-        label = 0  # 預設：超過持有期，視為中性
+    #     for j in range(1, max_hold_days + 1):
+    #         h = high_arr[i + 1 + j]
+    #         l = low_arr[i + 1 + j]
+    #         if np.isnan(h) or np.isnan(l):
+    #             continue
+    #         if l <= stop_loss:
+    #             label = -1
+    #             break
+    #         elif h >= target:
+    #             label = 1
+    #             break
 
-        for j in range(1, max_hold_days + 1):
-            h = high_arr[i + 1 + j]
-            l = low_arr[i + 1 + j]
-            if np.isnan(h) or np.isnan(l):
-                continue
-            if l <= stop_loss:
-                label = -1
-                break
-            elif h >= target:
-                label = 1
-                break
-
-        labels[i] = label
+    #     labels[i] = label
 
     df = df.copy()
     df["label"] = pd.array(labels, dtype=pd.Int8Dtype())  # 支援 NaN 的整數型別
