@@ -19,12 +19,14 @@ def calc_weighted_score(close: np.ndarray) -> np.ndarray:
 
     tail = close[252:]
     with np.errstate(divide="ignore", invalid="ignore"):
-        weighted[252:] = (
-            (tail / close[189:-63] - 1.0) * 0.4 +
-            (tail / close[126:-126] - 1.0) * 0.2 +
-            (tail / close[63:-189] - 1.0) * 0.2 +
-            (tail / close[:-252] - 1.0) * 0.2
-        ).astype(np.float32, copy=False)
+        length = n - 252
+        c = close  # alias
+        ret_3m = c[252:] / c[189:189+length] - 1.0
+        ret_6m = c[252:] / c[126:126+length] - 1.0
+        ret_9m = c[252:] / c[63:63+length] - 1.0
+        ret_12m = c[252:] / c[0:length] - 1.0
+        weighted[252:] = (ret_3m * 0.4 + ret_6m * 0.2 +
+                          ret_9m * 0.2 + ret_12m * 0.2).astype(np.float32)
 
     return weighted
 
@@ -129,8 +131,69 @@ def build_features(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict
     }
 
 
-def calculateRsRating():
-    """計算每天所有股票的 RS Rating，並存成 cache/{today}_RS.pkl"""
+def label_sample(df: pd.DataFrame, k: float = 1.0, max_hold_days: int = 63) -> pd.DataFrame:
+    """
+    對 df 的每一行（每個交易日），以「隔天開盤」作為進場價，
+    往後最多 max_hold_days 天，標記 1 / 0 / -1。
+
+    Parameters
+    ----------
+    df            : 含 open, close, atr 欄位，已按日期升序排列的單支股票 DataFrame
+    k             : 風險係數，R = k * ATR
+    max_hold_days : 最大持有天數（預設 63 ≈ 3 個月）
+
+    Returns
+    -------
+    df 加上 'label' 欄位（int8），最後 max_hold_days+1 筆因無足夠未來資料設為 NaN
+    """
+    n = len(df)
+    open_arr = df["open"].to_numpy(dtype=np.float32)
+    close_arr = df["close"].to_numpy(dtype=np.float32)
+    high_arr = df["max"].to_numpy(dtype=np.float32)
+    low_arr = df["min"].to_numpy(dtype=np.float32)
+    atr_arr = df["atr"].to_numpy(dtype=np.float32)
+
+    labels = np.full(n, np.nan, dtype=object)  # 預設 NaN（不足未來資料的行）
+
+    # 最後 (max_hold_days + 1) 筆無法完整往前看，跳過
+    # i     = 訊號日（當天收盤後決定是否進場）
+    # i+1   = 進場日（隔天開盤進場）
+    # i+1 ~ i+max_hold_days = 持有期間
+    for i in range(n - max_hold_days - 1):
+        entry_price = open_arr[i + 1]
+        atr_val = atr_arr[i + 1]
+
+        # ATR 或進場價為 NaN 時跳過
+        if np.isnan(entry_price) or np.isnan(atr_val) or atr_val <= 0:
+            continue
+
+        R = k * atr_val
+        target = entry_price + 2.0 * R
+        stop_loss = entry_price - R
+
+        label = 0  # 預設：超過持有期，視為中性
+
+        for j in range(1, max_hold_days + 1):
+            h = high_arr[i + 1 + j]
+            l = low_arr[i + 1 + j]
+            if np.isnan(h) or np.isnan(l):
+                continue
+            if l <= stop_loss:
+                label = -1
+                break
+            elif h >= target:
+                label = 1
+                break
+
+        labels[i] = label
+
+    df = df.copy()
+    df["label"] = pd.array(labels, dtype=pd.Int8Dtype())  # 支援 NaN 的整數型別
+    return df
+
+
+def dataProcess(dataTAIEX):
+    """計算每天所有股票的 RS Rating，並存成 cache/{today}_Data.pkl"""
     all_stock_scores = []
 
     # 用 scandir 比 listdir 更有效率
@@ -152,8 +215,8 @@ def calculateRsRating():
             df = df.sort_index()
 
         close_np = df["close"].to_numpy(dtype=np.float64, copy=False)
-        high_np = df["high"].to_numpy(dtype=np.float64, copy=False)
-        low_np = df["low"].to_numpy(dtype=np.float64, copy=False)
+        high_np = df["max"].to_numpy(dtype=np.float64, copy=False)
+        low_np = df["min"].to_numpy(dtype=np.float64, copy=False)
 
         weighted_score = calc_weighted_score(close_np)
         valid_mask = ~np.isnan(weighted_score)
@@ -172,24 +235,29 @@ def calculateRsRating():
         # entry_price[:-1] = open_arr[1:]
         # entry_price[-1] = np.nan
 
-        # 僅保留 weightedScore 有效資料列，減少 concat 與 groupby 成本
         temp = pd.DataFrame({
             "stock_id": df["stock_id"].iloc[0],
             "date": date_arr[valid_mask],
             "volume": df["Trading_Volume"].to_numpy(dtype=np.int32, copy=False)[valid_mask],
+            "volatility": features["volatility"][valid_mask],
             "weightedScore": weighted_score[valid_mask],
             "close": close_np.astype(np.float32, copy=False)[valid_mask],
+            "open": df["open"].to_numpy(dtype=np.float32, copy=False)[valid_mask],
+            "max": high_np.astype(np.float32, copy=False)[valid_mask],
+            "min": low_np.astype(np.float32, copy=False)[valid_mask],
             # "entryDate": entry_date[valid_mask],
             # "entryPrice": entry_price[valid_mask],
             "roc5": features["roc5"][valid_mask],
             "roc20": features["roc20"][valid_mask],
             "ma5": features["ma5"][valid_mask],
             "ma20": features["ma20"][valid_mask],
-            "volatility": features["volatility"][valid_mask],
             "atr":          features["atr"][valid_mask],
             "atr_pct":      features["atr_pct"][valid_mask]
         })
+        temp = temp.sort_values("date").reset_index(drop=True)  # 確保日期升序
+        temp = label_sample(temp, k=1.0, max_hold_days=21)
         all_stock_scores.append(temp)
+
     print(f"已處理 {len(all_stock_scores)} 支股票的 weightedScore 計算")
     if not all_stock_scores:
         print("沒有可用資料")
@@ -197,7 +265,7 @@ def calculateRsRating():
 
     # 一次合併
     big_df = pd.concat(all_stock_scores, ignore_index=True)
-
+    big_df = big_df.merge(dataTAIEX, on="date", how="left")  # 把台股大盤資料合併進來
     # ── 同一天橫截面排名 ──────────────────────────────────────
     print("正在計算同一天的 RS Rating 百分位排名...")
     big_df["rsRating"] = (
@@ -231,13 +299,50 @@ def calculateRsRating():
         kind="mergesort"
     ).reset_index(drop=True)
 
+    big_df.drop(columns=["weightedScore"], inplace=True)  # 不再需要原始分數
+
     # 存檔
     os.makedirs("cache", exist_ok=True)
     today = big_df["date"].max()
     big_df.to_pickle(f"cache/{today}_Data.pkl")
-
+    print(big_df["label"].value_counts(dropna=False))
     return big_df
 
 
+def dataProcessTAIEX():
+    dfPath = None
+    for entry in os.scandir("data"):
+        if not entry.is_file():
+            continue
+
+        file_name = entry.name
+        if file_name.endswith("TAIEX.pkl"):
+            dfPath = entry.path
+            break
+    if dfPath is None:
+        print("找不到 TAIEX 的資料檔")
+        return None
+    df = pd.read_pickle(dfPath)
+    close_np = df["close"].to_numpy(dtype=np.float64, copy=False)
+    high_np = df["max"].to_numpy(dtype=np.float64, copy=False)
+    low_np = df["min"].to_numpy(dtype=np.float64, copy=False)
+    features = build_features(high_np, low_np, close_np)
+
+    temp = pd.DataFrame({
+        "date": df["date"],
+        "TAIEXvolume": df["Trading_Volume"].to_numpy(dtype=np.int32, copy=False),
+        "TAIEXvolatility": features["volatility"],
+        "TAIEXclose": close_np.astype(np.float32, copy=False),
+        "TAIEXroc5": features["roc5"],
+        "TAIEXroc20": features["roc20"],
+        "TAIEXma5": features["ma5"],
+        "TAIEXma20": features["ma20"],
+        "TAIEXtrend": features["roc5"] > features["roc20"],
+        "TAIEXatr": features["atr"],
+        "TAIEXatr_pct": features["atr_pct"]
+    })
+    return temp
+
+
 if __name__ == "__main__":
-    calculateRsRating()
+    dataProcess(dataProcessTAIEX())
