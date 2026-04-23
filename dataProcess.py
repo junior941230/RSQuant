@@ -120,14 +120,20 @@ def build_features(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict
     close_series = pd.Series(close, copy=False)
 
     atr_raw = calc_atr(high, low, close, window=14)  # 原始 ATR（同幣值單位）
+    ma5 = close_series.rolling(5).mean().to_numpy(dtype=np.float32)
+    ma20 = close_series.rolling(20).mean().to_numpy(dtype=np.float32)
     # ATR% = ATR / close，方便跨股票比較（去除價格量級差異）
     with np.errstate(divide="ignore", invalid="ignore"):
         atr_pct = (atr_raw / close.astype(np.float32)).astype(np.float32)
+        ma5_over_ma20 = (ma5 / ma20).astype(np.float32)
+        close_over_ma20 = (close.astype(np.float32) / ma20).astype(np.float32)
     return {
         "roc5": close_series.pct_change(5).to_numpy(dtype=np.float32),
         "roc20": close_series.pct_change(20).to_numpy(dtype=np.float32),
-        "ma5": close_series.rolling(5).mean().to_numpy(dtype=np.float32),
-        "ma20": close_series.rolling(20).mean().to_numpy(dtype=np.float32),
+        "ma5": ma5,
+        "ma20": ma20,
+        "ma5_over_ma20":   ma5_over_ma20,
+        "close_over_ma20": close_over_ma20,
         "volatility": close_series.pct_change().rolling(20).std().to_numpy(dtype=np.float32),
         "atr":       atr_raw,    # 原始 ATR（同幣值單位）
         "atr_pct":   atr_pct,    # ATR / close（百分比波動，跨股票可比）
@@ -149,7 +155,7 @@ def _label_core(open_arr, high_arr, low_arr, atr_arr,
         R = k * atr_val
         target = entry + 2.0 * R
         stop_loss = entry - R
-        label = 0
+        label = -1
 
         for j in range(1, max_hold_days + 1):
             idx = i + 1 + j
@@ -175,6 +181,37 @@ def _label_core(open_arr, high_arr, low_arr, atr_arr,
     return labels
 
 
+@numba.njit(cache=True)
+def _label_forward_return(close_arr, atr_arr, hold_days=21):
+    """
+    標記 = 未來 hold_days 天的收益 / 進場日 ATR
+    
+    label  1: risk-adjusted return > +1.0  (賺超過 1 ATR)
+    label -1: risk-adjusted return < -0.5  (虧超過 0.5 ATR)
+    label  0: 介於中間（排除不用）
+    """
+    n = len(close_arr)
+    labels = np.full(n, -128, dtype=np.int8)
+
+    for i in range(n - hold_days - 1):
+        entry = close_arr[i]
+        future = close_arr[i + hold_days]
+        atr = atr_arr[i]
+
+        if np.isnan(entry) or np.isnan(future) or np.isnan(atr) or atr <= 0:
+            continue
+
+        ret_over_atr = (future - entry) / atr
+
+        if ret_over_atr > 1.0:
+            labels[i] = 1
+        elif ret_over_atr < -0.5:
+            labels[i] = -1
+        else:
+            labels[i] = 0  # 模糊區間，排除
+
+    return labels
+
 def label_sample(df: pd.DataFrame, k: float = 1.0, max_hold_days: int = 63) -> pd.DataFrame:
     """
     對 df 的每一行（每個交易日），以「隔天開盤」作為進場價，
@@ -190,53 +227,22 @@ def label_sample(df: pd.DataFrame, k: float = 1.0, max_hold_days: int = 63) -> p
     -------
     df 加上 'label' 欄位（int8），最後 max_hold_days+1 筆因無足夠未來資料設為 NaN
     """
-    n = len(df)
     open_arr = df["open"].to_numpy(dtype=np.float32)
     high_arr = df["max"].to_numpy(dtype=np.float32)
     low_arr = df["min"].to_numpy(dtype=np.float32)
     atr_arr = df["atr"].to_numpy(dtype=np.float32)
-    labels = _label_core(open_arr, high_arr, low_arr,
-                         atr_arr, k, max_hold_days)
-    # labels = np.full(n, np.nan, dtype=object)  # 預設 NaN（不足未來資料的行）
-
-    # # 最後 (max_hold_days + 1) 筆無法完整往前看，跳過
-    # # i     = 訊號日（當天收盤後決定是否進場）
-    # # i+1   = 進場日（隔天開盤進場）
-    # # i+1 ~ i+max_hold_days = 持有期間
-    # for i in range(n - max_hold_days - 1):
-    #     entry_price = open_arr[i + 1]
-    #     atr_val = atr_arr[i + 1]
-
-    #     # ATR 或進場價為 NaN 時跳過
-    #     if np.isnan(entry_price) or np.isnan(atr_val) or atr_val <= 0:
-    #         continue
-
-    #     R = k * atr_val
-    #     target = entry_price + 2.0 * R
-    #     stop_loss = entry_price - R
-
-    #     label = 0  # 預設：超過持有期，視為中性
-
-    #     for j in range(1, max_hold_days + 1):
-    #         h = high_arr[i + 1 + j]
-    #         l = low_arr[i + 1 + j]
-    #         if np.isnan(h) or np.isnan(l):
-    #             continue
-    #         if l <= stop_loss:
-    #             label = -1
-    #             break
-    #         elif h >= target:
-    #             label = 1
-    #             break
-
-    #     labels[i] = label
-
+    close_arr = df["close"].to_numpy(dtype=np.float32)
+    # labels = _label_core(open_arr, high_arr, low_arr,
+    #                      atr_arr, k, max_hold_days)
+    labels = _label_forward_return(close_arr, atr_arr, hold_days=max_hold_days)
     df = df.copy()
-    df["label"] = pd.array(labels, dtype=pd.Int8Dtype())  # 支援 NaN 的整數型別
+    label_series = pd.array(labels, dtype=pd.Int8Dtype())
+    label_series[labels == -128] = pd.NA   # ← 加這行
+    df["label"] = label_series
     return df
 
 
-def dataProcess(dataTAIEX):
+def dataProcess(dataTAIEX, max_hold_days: int = 63) -> pd.DataFrame:
     """計算每天所有股票的 RS Rating，並存成 cache/{today}_Data.pkl"""
     all_stock_scores = []
 
@@ -289,17 +295,17 @@ def dataProcess(dataTAIEX):
             "open": df["open"].to_numpy(dtype=np.float32, copy=False)[valid_mask],
             "max": high_np.astype(np.float32, copy=False)[valid_mask],
             "min": low_np.astype(np.float32, copy=False)[valid_mask],
-            # "entryDate": entry_date[valid_mask],
-            # "entryPrice": entry_price[valid_mask],
             "roc5": features["roc5"][valid_mask],
             "roc20": features["roc20"][valid_mask],
             "ma5": features["ma5"][valid_mask],
             "ma20": features["ma20"][valid_mask],
+            "ma5_over_ma20": features["ma5_over_ma20"][valid_mask],
+            "close_over_ma20": features["close_over_ma20"][valid_mask],
             "atr":          features["atr"][valid_mask],
             "atr_pct":      features["atr_pct"][valid_mask]
         })
         temp = temp.sort_values("date").reset_index(drop=True)  # 確保日期升序
-        temp = label_sample(temp, k=1.0, max_hold_days=21)
+        temp = label_sample(temp, k=1.5, max_hold_days=max_hold_days)
         all_stock_scores.append(temp)
 
     print(f"已處理 {len(all_stock_scores)} 支股票的 weightedScore 計算")
@@ -381,11 +387,39 @@ def dataProcessTAIEX():
         "TAIEXroc20": features["roc20"],
         "TAIEXma5": features["ma5"],
         "TAIEXma20": features["ma20"],
+        "TAIEXma5_ratio":   features["ma5_over_ma20"],
         "TAIEXtrend": features["roc5"] > features["roc20"],
         "TAIEXatr": features["atr"],
         "TAIEXatr_pct": features["atr_pct"]
     })
     return temp
+
+
+def purged_walk_forward(df, n_splits=5, embargo_days=21, max_hold_days=63):
+    """
+    Purged Walk-Forward CV for time-series data.
+
+    - Train/test 按時間切分
+    - Purge: 移除 train 尾端與 test 重疊的 label 窗口
+    - Embargo: test 開頭再多跳過 embargo_days
+    """
+    # str to datetime
+    df["date"] = pd.to_datetime(df["date"])
+    dates = df["date"].sort_values().unique()
+    fold_size = len(dates) // (n_splits + 1)
+
+    for i in range(n_splits):
+        train_end = dates[(i + 1) * fold_size]
+        test_start = dates[(i + 1) * fold_size + embargo_days]
+        test_end = dates[min((i + 2) * fold_size, len(dates) - 1)]
+
+        # Purge: 移除 train 中 label 窗口延伸到 test 的樣本
+        purge_start = train_end - pd.Timedelta(days=max_hold_days * 1.5)
+
+        train = df[(df["date"] <= purge_start)]
+        test = df[(df["date"] >= test_start) & (df["date"] <= test_end)]
+
+        yield train.index, test.index
 
 
 if __name__ == "__main__":
