@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier, Pool
 from sklearn.metrics import classification_report, log_loss
+from sklearn.feature_selection import mutual_info_classif
 from dataProcess import purged_walk_forward
 
 FEATURE_COLS = [
@@ -27,6 +28,20 @@ def prepare_data(df: pd.DataFrame):
     X = clean[FEATURE_COLS]
     y = clean[TARGET_COL]
     return clean, X, y
+
+
+def miAnalysis(X_train, y_train):
+    nan_counts = X_train.isna().sum()
+
+    if nan_counts.any():
+        print(f"  [警告] X_train 含 NaN 欄位：\n{nan_counts[nan_counts > 0]}")
+
+    # ── 僅供 MI 計算：用中位數填補 NaN ────────────────
+    X_train_for_mi = X_train.fillna(X_train.median())
+    mi = mutual_info_classif(X_train_for_mi, y_train, random_state=42)
+    for col, score in zip(FEATURE_COLS, mi):
+        print(f"  {col}: MI = {score:.4f}")
+    
 
 
 def train_with_purged_wf(df: pd.DataFrame,
@@ -56,6 +71,8 @@ def train_with_purged_wf(df: pd.DataFrame,
         print(f"  Test  label 分佈: {dict(y_test.value_counts().sort_index())}")
 
         # ── CatBoost 訓練 ────────────────────────────
+        miAnalysis(X_train, y_train)
+
         train_pool = Pool(X_train, y_train)
         eval_pool = Pool(X_test, y_test)
 
@@ -65,7 +82,8 @@ def train_with_purged_wf(df: pd.DataFrame,
             depth=6,
             l2_leaf_reg=3,
             auto_class_weights="Balanced",
-            eval_metric="MultiClass",
+            loss_function="MultiClass",      # ✅ 新增這行，明確指定
+            eval_metric="TotalF1",           # ✅ 多元分類用 TotalF1，比 MultiClass loss 更直觀
             early_stopping_rounds=50,
             random_seed=42,
             verbose=100,
@@ -107,7 +125,12 @@ def train_with_purged_wf(df: pd.DataFrame,
 
 
 if __name__ == "__main__":
-    df = pd.read_pickle("cache/20260423_TrainingDataset.pkl")
+    df = pd.read_pickle("cache/20260512_TrainingDataset.pkl")
+    df = df[df["date"] >= "2024-01-01"]
     df = df[df["rsRating"] >= 87]
-    print(df["label"].value_counts(dropna=False))
+    df = df[df["label"].notna()]
+    # 前向填充 rsRating 和 deltaRS 的 NaN 值
+    df['rsRating'] = df['rsRating'].ffill()
+    df['deltaRS_rank'] = df['deltaRS_rank'].ffill()
+    df['deltaRS'] = df['deltaRS'].fillna(0)
     train_with_purged_wf(df, n_splits=5, max_hold_days=21, embargo_days=5)

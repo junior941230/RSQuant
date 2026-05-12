@@ -4,9 +4,10 @@ import numpy as np
 import numba
 
 
-def calc_weighted_score(close: np.ndarray) -> np.ndarray:
+def calcWeightedScore(close: np.ndarray) -> np.ndarray:
     """
     對單一股票的 close 價格序列，計算每天的 weightedScore
+
     使用：
     3m = 63 天
     6m = 126 天
@@ -15,412 +16,557 @@ def calc_weighted_score(close: np.ndarray) -> np.ndarray:
     """
     n = close.shape[0]
     weighted = np.full(n, np.nan, dtype=np.float32)
+
     if n <= 252:
         return weighted
 
-    tail = close[252:]
     with np.errstate(divide="ignore", invalid="ignore"):
         length = n - 252
-        c = close  # alias
-        ret_3m = c[252:] / c[189:189+length] - 1.0
-        ret_6m = c[252:] / c[126:126+length] - 1.0
-        ret_9m = c[252:] / c[63:63+length] - 1.0
-        ret_12m = c[252:] / c[0:length] - 1.0
-        weighted[252:] = (ret_3m * 0.4 + ret_6m * 0.2 +
-                          ret_9m * 0.2 + ret_12m * 0.2).astype(np.float32)
+        c = close
+
+        ret3m = c[252:] / c[189:189 + length] - 1.0
+        ret6m = c[252:] / c[126:126 + length] - 1.0
+        ret9m = c[252:] / c[63:63 + length] - 1.0
+        ret12m = c[252:] / c[0:length] - 1.0
+
+        weighted[252:] = (
+            ret3m * 0.4
+            + ret6m * 0.2
+            + ret9m * 0.2
+            + ret12m * 0.2
+        ).astype(np.float32)
 
     return weighted
 
 
-def calculate_delta_rs(rs, window: int = 10) -> np.ndarray:
+def calculateDeltaRs(rs, window: int = 10) -> np.ndarray:
     """
-    向量化滾動 OLS 斜率
-    用 rolling 線性回歸斜率計算 ΔRS（單一股票的 rs_rating 序列）
+    向量化滾動 OLS 斜率。
+
+    用 rolling 線性回歸斜率計算 ΔRS。
 
     Parameters
     ----------
-    rs     : 單一股票的 rsRating 時間序列（已按日期排序）
-    window : 回歸窗口，預設 10 個交易日
+    rs:
+        單一股票的 rsRating 時間序列，已按日期排序。
+
+    window:
+        回歸窗口，預設 10 個交易日。
 
     Returns
     -------
-    slopes : 與 rs 等長的 np.ndarray，前 window-1 筆為 NaN
+    slopes:
+        與 rs 等長的 np.ndarray，前 window - 1 筆為 NaN。
     """
     s = pd.Series(rs, dtype=np.float32)
-    x = np.arange(window, dtype=np.float32)
-    x_mean = x.mean()
-    x_var = ((x - x_mean) ** 2).sum()
 
-    # rolling covariance with x = rolling_mean(x*y) - x_mean * rolling_mean(y)
-    # 但更直接的方式：用 rolling sum
-    y_roll_sum = s.rolling(window, min_periods=window).sum()
-    # Σ(x_i * y_i) = Σ(i * y_{t-window+1+i}) for i in 0..window-1
-    # 等價於 weighted rolling sum
+    x = np.arange(window, dtype=np.float32)
+    xMean = x.mean()
+    xVar = ((x - xMean) ** 2).sum()
+
+    yRollSum = s.rolling(window, min_periods=window).sum()
+
     weights = np.arange(window, dtype=np.float32)
-    xy_roll = s.rolling(window, min_periods=window).apply(
-        lambda y: (weights * y).sum(), raw=True
+    xyRoll = s.rolling(window, min_periods=window).apply(
+        lambda y: (weights * y).sum(),
+        raw=True
     )
-    y_mean_roll = y_roll_sum / window
-    slopes = (xy_roll - x_mean * y_roll_sum) / x_var
+
+    slopes = (xyRoll - xMean * yRollSum) / xVar
+
     return slopes.to_numpy(dtype=np.float32)
 
 
-def calc_atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, window: int = 14) -> np.ndarray:
+def calcAtr(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    window: int = 14
+) -> np.ndarray:
     """
-    計算 ATR（Average True Range），使用 Wilder's smoothing（EMA with alpha=1/window）。
+    計算 ATR，使用 Wilder's smoothing。
 
     True Range = max(
         high - low,
-        |high - prev_close|,
-        |low  - prev_close|
+        |high - prevClose|,
+        |low - prevClose|
     )
 
     Parameters
     ----------
-    high, low, close : 等長的價格序列（已按日期排序）
-    window           : ATR 平滑週期，預設 14
+    high, low, close:
+        等長的價格序列，已按日期排序。
+
+    window:
+        ATR 平滑週期，預設 14。
 
     Returns
     -------
-    atr : 與輸入等長的 np.ndarray（float32），前 window 筆為 NaN
+    atr:
+        與輸入等長的 np.ndarray，float32，前 window 筆為 NaN。
     """
     n = len(close)
     atr = np.full(n, np.nan, dtype=np.float32)
+
     if n < window + 1:
         return atr
 
-    # ── True Range ──────────────────────────────────────────
-    prev_close = close[:-1]          # shape (n-1,)
-    hl = high[1:] - low[1:]        # high - low
-    hpc = np.abs(high[1:] - prev_close)   # |high - prev_close|
-    lpc = np.abs(low[1:] - prev_close)   # |low  - prev_close|
+    prevClose = close[:-1]
+
+    hl = high[1:] - low[1:]
+    hpc = np.abs(high[1:] - prevClose)
+    lpc = np.abs(low[1:] - prevClose)
 
     tr = np.maximum(hl, np.maximum(hpc, lpc)).astype(np.float32)
-    # tr 的索引對應原序列的 [1..n-1]
 
-    # ── Wilder's smoothing（等同 EMA alpha=1/window）────────
-    # 第一個 ATR 值 = 前 window 筆 TR 的簡單平均
-    first_atr = tr[:window].mean()
+    firstAtr = tr[:window].mean()
     alpha = 1.0 / window
 
     wilder = np.empty(len(tr), dtype=np.float32)
-    wilder[window - 1] = first_atr
+    wilder[window - 1] = firstAtr
 
-    # 向量化 Wilder smoothing（用迴圈仍是最直覺，但加 numba 可加速）
     for i in range(window, len(tr)):
         wilder[i] = wilder[i - 1] * (1.0 - alpha) + tr[i] * alpha
 
-    # 對齊回原序列（tr 從索引 1 開始，ATR 從索引 window 開始）
     atr[window:] = wilder[window - 1:]
 
     return atr
 
 
-def build_features(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> dict[str, np.ndarray]:
-    close_series = pd.Series(close, copy=False)
+def buildFeatures(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray
+) -> dict[str, np.ndarray]:
+    closeSeries = pd.Series(close, copy=False)
 
-    atr_raw = calc_atr(high, low, close, window=14)  # 原始 ATR（同幣值單位）
-    ma5 = close_series.rolling(5).mean().to_numpy(dtype=np.float32)
-    ma20 = close_series.rolling(20).mean().to_numpy(dtype=np.float32)
-    # ATR% = ATR / close，方便跨股票比較（去除價格量級差異）
+    atrRaw = calcAtr(high, low, close, window=14)
+
+    ma5 = closeSeries.rolling(5).mean().to_numpy(dtype=np.float32)
+    ma20 = closeSeries.rolling(20).mean().to_numpy(dtype=np.float32)
+
     with np.errstate(divide="ignore", invalid="ignore"):
-        atr_pct = (atr_raw / close.astype(np.float32)).astype(np.float32)
-        ma5_over_ma20 = (ma5 / ma20).astype(np.float32)
-        close_over_ma20 = (close.astype(np.float32) / ma20).astype(np.float32)
+        atrPct = (atrRaw / close.astype(np.float32)).astype(np.float32)
+        ma5OverMa20 = (ma5 / ma20).astype(np.float32)
+        closeOverMa20 = (close.astype(np.float32) / ma20).astype(np.float32)
+
     return {
-        "roc5": close_series.pct_change(5).to_numpy(dtype=np.float32),
-        "roc20": close_series.pct_change(20).to_numpy(dtype=np.float32),
+        "roc5": closeSeries.pct_change(5).to_numpy(dtype=np.float32),
+        "roc20": closeSeries.pct_change(20).to_numpy(dtype=np.float32),
         "ma5": ma5,
         "ma20": ma20,
-        "ma5_over_ma20":   ma5_over_ma20,
-        "close_over_ma20": close_over_ma20,
-        "volatility": close_series.pct_change().rolling(20).std().to_numpy(dtype=np.float32),
-        "atr":       atr_raw,    # 原始 ATR（同幣值單位）
-        "atr_pct":   atr_pct,    # ATR / close（百分比波動，跨股票可比）
+        "ma5_over_ma20": ma5OverMa20,
+        "close_over_ma20": closeOverMa20,
+        "volatility": closeSeries.pct_change().rolling(20).std().to_numpy(dtype=np.float32),
+        "atr": atrRaw,
+        "atr_pct": atrPct,
     }
 
 
 @numba.njit
-def _label_core(open_arr, high_arr, low_arr, atr_arr,
-                k, max_hold_days):
-    n = len(open_arr)
-    labels = np.full(n, -128, dtype=np.int8)  # -128 = NaN sentinel
+def _labelTriple(openArr, highArr, lowArr, atrArr, k, maxHoldDays):
+    """
+    標記 = 往後 maxHoldDays 天內是否觸及以下條件：
 
-    for i in range(n - max_hold_days - 1):
-        entry = open_arr[i + 1]
-        atr_val = atr_arr[i + 1]
-        if np.isnan(entry) or np.isnan(atr_val) or atr_val <= 0:
+    target = entry + 2.0 * R
+    stopLoss = entry - R
+
+    label  1: 觸及 target，賺超過 2R
+    label -1: 觸及 stopLoss，虧超過 1R
+    label  0: 介於中間，排除不用
+    """
+    n = len(openArr)
+    labels = np.full(n, -128, dtype=np.int8)
+
+    for i in range(n - maxHoldDays - 1):
+        entry = openArr[i + 1]
+        atrVal = atrArr[i + 1]
+
+        if np.isnan(entry) or np.isnan(atrVal) or atrVal <= 0:
             continue
 
-        R = k * atr_val
-        target = entry + 2.0 * R
-        stop_loss = entry - R
-        label = -1
+        r = k * atrVal
+        target = entry + 2.0 * r
+        stopLoss = entry - r
+        label = 0
 
-        for j in range(1, max_hold_days + 1):
+        for j in range(1, maxHoldDays + 1):
             idx = i + 1 + j
-            h = high_arr[idx]
-            l = low_arr[idx]
+            h = highArr[idx]
+            l = lowArr[idx]
+
             if np.isnan(h) or np.isnan(l):
                 continue
 
-            hit_tp = h >= target
-            hit_sl = l <= stop_loss
+            hitTp = h >= target
+            hitSl = l <= stopLoss
 
-            if hit_tp and hit_sl:
+            if hitTp and hitSl:
                 label = -1
                 break
-            elif hit_tp:
+            elif hitTp:
                 label = 1
                 break
-            elif hit_sl:
+            elif hitSl:
                 label = -1
                 break
 
         labels[i] = label
+
     return labels
 
 
 @numba.njit(cache=True)
-def _label_forward_return(close_arr, atr_arr, hold_days=21):
+def _labelForwardReturn(closeArr, atrArr, holdDays=21):
     """
-    標記 = 未來 hold_days 天的收益 / 進場日 ATR
-    
-    label  1: risk-adjusted return > +1.0  (賺超過 1 ATR)
-    label -1: risk-adjusted return < -0.5  (虧超過 0.5 ATR)
-    label  0: 介於中間（排除不用）
+    標記 = 未來 holdDays 天的收益 / 進場日 ATR。
+
+    label  1: risk-adjusted return > +1.0，賺超過 1 ATR
+    label -1: risk-adjusted return < -0.5，虧超過 0.5 ATR
+    label  0: 介於中間，排除不用
     """
-    n = len(close_arr)
+    n = len(closeArr)
     labels = np.full(n, -128, dtype=np.int8)
 
-    for i in range(n - hold_days - 1):
-        entry = close_arr[i]
-        future = close_arr[i + hold_days]
-        atr = atr_arr[i]
+    for i in range(n - holdDays - 1):
+        entry = closeArr[i]
+        future = closeArr[i + holdDays]
+        atr = atrArr[i]
 
         if np.isnan(entry) or np.isnan(future) or np.isnan(atr) or atr <= 0:
             continue
 
-        ret_over_atr = (future - entry) / atr
+        retOverAtr = (future - entry) / atr
 
-        if ret_over_atr > 1.0:
+        if retOverAtr > 1.0:
             labels[i] = 1
-        elif ret_over_atr < -0.5:
+        elif retOverAtr < -0.5:
             labels[i] = -1
         else:
-            labels[i] = 0  # 模糊區間，排除
+            labels[i] = 0
 
     return labels
 
-def label_sample(df: pd.DataFrame, k: float = 1.0, max_hold_days: int = 63) -> pd.DataFrame:
+
+@numba.njit(cache=True)
+def _labelTripleWithTaiex(openArr, highArr, lowArr, atrArr, k, maxHoldDays):
     """
-    對 df 的每一行（每個交易日），以「隔天開盤」作為進場價，
-    往後最多 max_hold_days 天，標記 1 / 0 / -1。
+    標記 = 往後 maxHoldDays 天內是否觸及以下條件：
+
+    target = entry + 2.0 * R
+    stopLoss = entry - R
+
+    label  1: 觸及 target，賺超過 2R
+    label -1: 觸及 stopLoss，虧超過 1R
+    label  0: 介於中間，排除不用
+
+    注意：
+    目前此函式名稱保留 Taiex，但邏輯中尚未使用大盤資料。
+    """
+    n = len(openArr)
+    labels = np.full(n, -128, dtype=np.int8)
+
+    for i in range(n - maxHoldDays - 1):
+        entry = openArr[i + 1]
+        atrVal = atrArr[i + 1]
+
+        if np.isnan(entry) or np.isnan(atrVal) or atrVal <= 0:
+            continue
+
+        r = k * atrVal
+        target = entry + 2.0 * r
+        stopLoss = entry - r
+        label = 0
+
+        for j in range(1, maxHoldDays + 1):
+            idx = i + 1 + j
+            h = highArr[idx]
+            l = lowArr[idx]
+
+            if np.isnan(h) or np.isnan(l):
+                continue
+
+            hitTp = h >= target
+            hitSl = l <= stopLoss
+
+            if hitTp and hitSl:
+                label = -1
+                break
+            elif hitTp:
+                label = 1
+                break
+            elif hitSl:
+                label = -1
+                break
+
+        labels[i] = label
+
+    return labels
+
+
+def labelSample(
+    df: pd.DataFrame,
+    dataTaiex: pd.DataFrame,
+    k: float = 1.0,
+    maxHoldDays: int = 63
+) -> pd.DataFrame:
+    """
+    對 df 的每一行，以隔天開盤作為進場價，
+    往後最多 maxHoldDays 天，標記 1 / 0 / -1。
 
     Parameters
     ----------
-    df            : 含 open, close, atr 欄位，已按日期升序排列的單支股票 DataFrame
-    k             : 風險係數，R = k * ATR
-    max_hold_days : 最大持有天數（預設 63 ≈ 3 個月）
+    df:
+        含 open, close, atr 欄位，已按日期升序排列的單支股票 DataFrame。
+
+    dataTaiex:
+        台股大盤資料 DataFrame。
+        目前保留此參數，但標記邏輯尚未直接使用大盤資料。
+
+    k:
+        風險係數，R = k * ATR。
+
+    maxHoldDays:
+        最大持有天數，預設 63，約 3 個月。
 
     Returns
     -------
-    df 加上 'label' 欄位（int8），最後 max_hold_days+1 筆因無足夠未來資料設為 NaN
+    df:
+        加上 label 欄位。
+        最後 maxHoldDays + 1 筆因無足夠未來資料設為 NA。
     """
-    open_arr = df["open"].to_numpy(dtype=np.float32)
-    high_arr = df["max"].to_numpy(dtype=np.float32)
-    low_arr = df["min"].to_numpy(dtype=np.float32)
-    atr_arr = df["atr"].to_numpy(dtype=np.float32)
-    close_arr = df["close"].to_numpy(dtype=np.float32)
-    # labels = _label_core(open_arr, high_arr, low_arr,
-    #                      atr_arr, k, max_hold_days)
-    labels = _label_forward_return(close_arr, atr_arr, hold_days=max_hold_days)
+    _ = dataTaiex
+
+    openArr = df["open"].to_numpy(dtype=np.float32)
+    highArr = df["max"].to_numpy(dtype=np.float32)
+    lowArr = df["min"].to_numpy(dtype=np.float32)
+    atrArr = df["atr"].to_numpy(dtype=np.float32)
+
+    labels = _labelTripleWithTaiex(
+        openArr,
+        highArr,
+        lowArr,
+        atrArr,
+        k,
+        maxHoldDays
+    )
+
     df = df.copy()
-    label_series = pd.array(labels, dtype=pd.Int8Dtype())
-    label_series[labels == -128] = pd.NA   # ← 加這行
-    df["label"] = label_series
+
+    labelSeries = pd.array(labels, dtype=pd.Int8Dtype())
+    labelSeries[labels == -128] = pd.NA
+
+    df["label"] = labelSeries
+
     return df
 
 
-def dataProcess(dataTAIEX, max_hold_days: int = 63) -> pd.DataFrame:
-    """計算每天所有股票的 RS Rating，並存成 cache/{today}_Data.pkl"""
-    all_stock_scores = []
+def dataProcess(dataTaiex, maxHoldDays: int = 63) -> pd.DataFrame:
+    """
+    計算每天所有股票的 RS Rating，並存成 cache/{today}_Data.pkl。
+    """
+    allStockScores = []
 
-    # 用 scandir 比 listdir 更有效率
     for entry in os.scandir("data"):
         if not entry.is_file():
             continue
 
-        file_name = entry.name
-        if len(file_name) != 30:
+        fileName = entry.name
+
+        if len(fileName) != 30:
             continue
 
         df = pd.read_pickle(entry.path)
-        df = df[df["date"] >= "2024-01-01"]  # 只處理 2024 年以後的資料
+        df = df[df["date"] >= "2020-01-01"]
+
         if len(df) <= 252:
             continue
 
-        # 只在真的沒排序時才排序
         if not df.index.is_monotonic_increasing:
             df = df.sort_index()
 
-        close_np = df["close"].to_numpy(dtype=np.float64, copy=False)
-        high_np = df["max"].to_numpy(dtype=np.float64, copy=False)
-        low_np = df["min"].to_numpy(dtype=np.float64, copy=False)
+        closeNp = df["close"].to_numpy(dtype=np.float64, copy=False)
+        highNp = df["max"].to_numpy(dtype=np.float64, copy=False)
+        lowNp = df["min"].to_numpy(dtype=np.float64, copy=False)
 
-        weighted_score = calc_weighted_score(close_np)
-        valid_mask = ~np.isnan(weighted_score)
-        if not valid_mask.any():
+        weightedScore = calcWeightedScore(closeNp)
+        validMask = ~np.isnan(weightedScore)
+
+        if not validMask.any():
             continue
 
-        features = build_features(high_np, low_np, close_np)
+        features = buildFeatures(highNp, lowNp, closeNp)
 
-        date_arr = df["date"].to_numpy()
-        # entry_date = np.empty(date_arr.shape[0], dtype=object)
-        # entry_date[:-1] = date_arr[1:]
-        # entry_date[-1] = pd.NaT
-
-        # open_arr = df["open"].to_numpy(dtype=np.float32, copy=False)
-        # entry_price = np.empty(open_arr.shape[0], dtype=np.float32)
-        # entry_price[:-1] = open_arr[1:]
-        # entry_price[-1] = np.nan
+        dateArr = df["date"].to_numpy()
 
         temp = pd.DataFrame({
             "stock_id": df["stock_id"].iloc[0],
-            "date": date_arr[valid_mask],
-            "volume": df["Trading_Volume"].to_numpy(dtype=np.int32, copy=False)[valid_mask],
-            "volatility": features["volatility"][valid_mask],
-            "weightedScore": weighted_score[valid_mask],
-            "close": close_np.astype(np.float32, copy=False)[valid_mask],
-            "open": df["open"].to_numpy(dtype=np.float32, copy=False)[valid_mask],
-            "max": high_np.astype(np.float32, copy=False)[valid_mask],
-            "min": low_np.astype(np.float32, copy=False)[valid_mask],
-            "roc5": features["roc5"][valid_mask],
-            "roc20": features["roc20"][valid_mask],
-            "ma5": features["ma5"][valid_mask],
-            "ma20": features["ma20"][valid_mask],
-            "ma5_over_ma20": features["ma5_over_ma20"][valid_mask],
-            "close_over_ma20": features["close_over_ma20"][valid_mask],
-            "atr":          features["atr"][valid_mask],
-            "atr_pct":      features["atr_pct"][valid_mask]
+            "date": dateArr[validMask],
+            "volume": df["Trading_Volume"].to_numpy(dtype=np.int32, copy=False)[validMask],
+            "volatility": features["volatility"][validMask],
+            "weightedScore": weightedScore[validMask],
+            "close": closeNp.astype(np.float32, copy=False)[validMask],
+            "open": df["open"].to_numpy(dtype=np.float32, copy=False)[validMask],
+            "max": highNp.astype(np.float32, copy=False)[validMask],
+            "min": lowNp.astype(np.float32, copy=False)[validMask],
+            "roc5": features["roc5"][validMask],
+            "roc20": features["roc20"][validMask],
+            "ma5": features["ma5"][validMask],
+            "ma20": features["ma20"][validMask],
+            "ma5_over_ma20": features["ma5_over_ma20"][validMask],
+            "close_over_ma20": features["close_over_ma20"][validMask],
+            "atr": features["atr"][validMask],
+            "atr_pct": features["atr_pct"][validMask],
         })
-        temp = temp.sort_values("date").reset_index(drop=True)  # 確保日期升序
-        temp = label_sample(temp, k=1.5, max_hold_days=max_hold_days)
-        all_stock_scores.append(temp)
 
-    print(f"已處理 {len(all_stock_scores)} 支股票的 weightedScore 計算")
-    if not all_stock_scores:
+        temp = temp.sort_values("date").reset_index(drop=True)
+
+        temp = labelSample(
+            temp,
+            dataTaiex,
+            k=1.5,
+            maxHoldDays=maxHoldDays
+        )
+
+        allStockScores.append(temp)
+
+    print(f"已處理 {len(allStockScores)} 支股票的 weightedScore 計算")
+
+    if not allStockScores:
         print("沒有可用資料")
         return pd.DataFrame()
 
-    # 一次合併
-    big_df = pd.concat(all_stock_scores, ignore_index=True)
-    big_df = big_df.merge(dataTAIEX, on="date", how="left")  # 把台股大盤資料合併進來
-    # ── 同一天橫截面排名 ──────────────────────────────────────
+    bigDf = pd.concat(allStockScores, ignore_index=True)
+
+    bigDf = bigDf.merge(
+        dataTaiex,
+        on="date",
+        how="left"
+    )
+
     print("正在計算同一天的 RS Rating 百分位排名...")
-    big_df["rsRating"] = (
-        big_df.groupby("date", sort=False)["weightedScore"]
+
+    bigDf["rsRating"] = (
+        bigDf.groupby("date", sort=False)["weightedScore"]
         .rank(pct=True, method="min")
         .mul(100)
         .astype(np.uint8)
     )
 
-    # ── ΔRS：每支股票自己的時間序列斜率 ──────────────────────
-    # 先排好時間順序再 groupby，確保斜率計算正確
     print("正在計算 ΔRS...")
-    big_df = big_df.sort_values(["stock_id", "date"]).reset_index(drop=True)
 
-    big_df["deltaRS"] = (
-        big_df.groupby("stock_id", sort=False)["rsRating"]
-        .transform(lambda x: calculate_delta_rs(x.to_numpy(dtype=np.float32)))
+    bigDf = bigDf.sort_values(["stock_id", "date"]).reset_index(drop=True)
+
+    bigDf["deltaRS"] = (
+        bigDf.groupby("stock_id", sort=False)["rsRating"]
+        .transform(
+            lambda x: calculateDeltaRs(
+                x.to_numpy(dtype=np.float32)
+            )
+        )
     )
 
-    # ── ΔRS Rank：同日橫截面百分位（0~100）────────────────────
-    big_df["deltaRS_rank"] = (
-        big_df.groupby("date", sort=False)["deltaRS"]
+    bigDf["deltaRS_rank"] = (
+        bigDf.groupby("date", sort=False)["deltaRS"]
         .transform(lambda x: x.rank(pct=True, method="min") * 100)
         .astype(np.float32)
     )
 
-    # ── 最終排序 ──────────────────────────────────────────────
-    big_df = big_df.sort_values(
+    bigDf = bigDf.sort_values(
         ["date", "rsRating"],
         ascending=[True, False],
         kind="mergesort"
     ).reset_index(drop=True)
 
-    big_df.drop(columns=["weightedScore"], inplace=True)  # 不再需要原始分數
+    bigDf.drop(columns=["weightedScore"], inplace=True)
 
-    # 存檔
     os.makedirs("cache", exist_ok=True)
-    today = big_df["date"].max()
-    big_df.to_pickle(f"cache/{today}_Data.pkl")
-    print(big_df["label"].value_counts(dropna=False))
-    return big_df
+
+    today = bigDf["date"].max()
+
+    bigDf.to_pickle(f"cache/{today}_Data.pkl")
+
+    print(bigDf["label"].value_counts(dropna=False))
+
+    return bigDf
 
 
-def dataProcessTAIEX():
+def dataProcessTaiex():
     dfPath = None
+
     for entry in os.scandir("data"):
         if not entry.is_file():
             continue
 
-        file_name = entry.name
-        if file_name.endswith("TAIEX.pkl"):
+        fileName = entry.name
+
+        if fileName.endswith("TAIEX.pkl"):
             dfPath = entry.path
             break
+
     if dfPath is None:
         print("找不到 TAIEX 的資料檔")
         return None
+
     df = pd.read_pickle(dfPath)
-    close_np = df["close"].to_numpy(dtype=np.float64, copy=False)
-    high_np = df["max"].to_numpy(dtype=np.float64, copy=False)
-    low_np = df["min"].to_numpy(dtype=np.float64, copy=False)
-    features = build_features(high_np, low_np, close_np)
+
+    closeNp = df["close"].to_numpy(dtype=np.float64, copy=False)
+    highNp = df["max"].to_numpy(dtype=np.float64, copy=False)
+    lowNp = df["min"].to_numpy(dtype=np.float64, copy=False)
+
+    features = buildFeatures(highNp, lowNp, closeNp)
 
     temp = pd.DataFrame({
         "date": df["date"],
         "TAIEXvolume": df["Trading_Volume"].to_numpy(dtype=np.int32, copy=False),
         "TAIEXvolatility": features["volatility"],
-        "TAIEXclose": close_np.astype(np.float32, copy=False),
+        "TAIEXclose": closeNp.astype(np.float32, copy=False),
         "TAIEXroc5": features["roc5"],
         "TAIEXroc20": features["roc20"],
         "TAIEXma5": features["ma5"],
         "TAIEXma20": features["ma20"],
-        "TAIEXma5_ratio":   features["ma5_over_ma20"],
+        "TAIEXma5_ratio": features["ma5_over_ma20"],
         "TAIEXtrend": features["roc5"] > features["roc20"],
         "TAIEXatr": features["atr"],
-        "TAIEXatr_pct": features["atr_pct"]
+        "TAIEXatr_pct": features["atr_pct"],
     })
+
     return temp
 
 
-def purged_walk_forward(df, n_splits=5, embargo_days=21, max_hold_days=63):
+def purgedWalkForward(
+    df,
+    nSplits=5,
+    embargoDays=21,
+    maxHoldDays=63
+):
     """
     Purged Walk-Forward CV for time-series data.
 
-    - Train/test 按時間切分
+    - Train / test 按時間切分
     - Purge: 移除 train 尾端與 test 重疊的 label 窗口
-    - Embargo: test 開頭再多跳過 embargo_days
+    - Embargo: test 開頭再多跳過 embargoDays
     """
-    # str to datetime
     df["date"] = pd.to_datetime(df["date"])
+
     dates = df["date"].sort_values().unique()
-    fold_size = len(dates) // (n_splits + 1)
+    foldSize = len(dates) // (nSplits + 1)
 
-    for i in range(n_splits):
-        train_end = dates[(i + 1) * fold_size]
-        test_start = dates[(i + 1) * fold_size + embargo_days]
-        test_end = dates[min((i + 2) * fold_size, len(dates) - 1)]
+    for i in range(nSplits):
+        trainEnd = dates[(i + 1) * foldSize]
+        testStart = dates[(i + 1) * foldSize + embargoDays]
+        testEnd = dates[min((i + 2) * foldSize, len(dates) - 1)]
 
-        # Purge: 移除 train 中 label 窗口延伸到 test 的樣本
-        purge_start = train_end - pd.Timedelta(days=max_hold_days * 1.5)
+        purgeStart = trainEnd - pd.Timedelta(days=maxHoldDays * 1.5)
 
-        train = df[(df["date"] <= purge_start)]
-        test = df[(df["date"] >= test_start) & (df["date"] <= test_end)]
+        train = df[df["date"] <= purgeStart]
+        test = df[
+            (df["date"] >= testStart)
+            & (df["date"] <= testEnd)
+        ]
 
         yield train.index, test.index
 
 
 if __name__ == "__main__":
-    dataProcess(dataProcessTAIEX())
+    dataProcess(dataProcessTaiex())
