@@ -249,7 +249,7 @@ def _labelForwardReturn(closeArr, atrArr, holdDays=21):
 
 
 @numba.njit(cache=True)
-def _labelTripleWithTaiex(openArr, highArr, lowArr, atrArr, k, maxHoldDays):
+def _labelTripleWithTaiex(pack, packTAIEX, atrArr, k, maxHoldDays):
     """
     標記 = 往後 maxHoldDays 天內是否觸及以下條件：
 
@@ -263,31 +263,48 @@ def _labelTripleWithTaiex(openArr, highArr, lowArr, atrArr, k, maxHoldDays):
     注意：
     目前此函式名稱保留 Taiex，但邏輯中尚未使用大盤資料。
     """
+    openArr, highArr, lowArr = pack
+    openArrTaiex, highArrTaiex, lowArrTaiex, closeArrTaiex = packTAIEX
     n = len(openArr)
     labels = np.full(n, -128, dtype=np.int8)
 
     for i in range(n - maxHoldDays - 1):
         entry = openArr[i + 1]
+        entryTaiex = openArrTaiex[i + 1]
         atrVal = atrArr[i + 1]
 
-        if np.isnan(entry) or np.isnan(atrVal) or atrVal <= 0:
+        if np.isnan(entry) or np.isnan(entryTaiex) or np.isnan(atrVal) or atrVal <= 0:
             continue
 
-        r = k * atrVal
-        target = entry + 2.0 * r
-        stopLoss = entry - r
         label = 0
+        Tp = 2.0 * k * (atrVal / entry)
+        Sl = -k * (atrVal / entry)
 
         for j in range(1, maxHoldDays + 1):
             idx = i + 1 + j
-            h = highArr[idx]
-            l = lowArr[idx]
+            # 改成：都用各自的進場點計算累積報酬
+            cumStock_H = highArr[idx] / entry - 1.0
+            cumStock_L = lowArr[idx] / entry - 1.0
+            cumTaiex = closeArrTaiex[idx] / entryTaiex - 1.0  # 用 close 更穩定
 
-            if np.isnan(h) or np.isnan(l):
-                continue
+            relativeH = cumStock_H - cumTaiex  # 個股超額 high
+            relativeL = cumStock_L - cumTaiex  # 個股超額 low
 
-            hitTp = h >= target
-            hitSl = l <= stopLoss
+            hitTp = relativeH >= Tp   # Tp = 2 * k * atr_pct
+            hitSl = relativeL <= Sl   # Sl = -k * atr_pct
+
+            # perTaiexOpen = openArrTaiex[idx] / entryTaiex
+            # h = highArr[idx]
+            # l = lowArr[idx]
+            
+            # perH = h / entry
+            # perL = l / entry
+            # relativeH = perH - perTaiexOpen   # 個股 high 相對大盤當天 open
+            # relativeL = perL - perTaiexOpen   # 個股 low  相對大盤當天 open
+            # if np.isnan(h) or np.isnan(l) or np.isnan(perTaiexOpen):
+            #     continue
+            # hitTp = relativeH >= Tp
+            # hitSl = relativeL <= Sl
 
             if hitTp and hitSl:
                 label = -1
@@ -335,17 +352,22 @@ def labelSample(
         加上 label 欄位。
         最後 maxHoldDays + 1 筆因無足夠未來資料設為 NA。
     """
-    _ = dataTaiex
 
     openArr = df["open"].to_numpy(dtype=np.float32)
     highArr = df["max"].to_numpy(dtype=np.float32)
     lowArr = df["min"].to_numpy(dtype=np.float32)
     atrArr = df["atr"].to_numpy(dtype=np.float32)
+    pack = (openArr, highArr, lowArr)
+
+    taiexOpenArr = dataTaiex["TAIEXopen"].to_numpy(dtype=np.float32)
+    taiexMaxArr = dataTaiex["TAIEXmax"].to_numpy(dtype=np.float32)
+    taiexMinArr = dataTaiex["TAIEXmin"].to_numpy(dtype=np.float32)
+    closeArrTaiex = dataTaiex["TAIEXclose"].to_numpy(dtype=np.float32)
+    packTAIEX = (taiexOpenArr, taiexMaxArr, taiexMinArr, closeArrTaiex)
 
     labels = _labelTripleWithTaiex(
-        openArr,
-        highArr,
-        lowArr,
+        pack,
+        packTAIEX,
         atrArr,
         k,
         maxHoldDays
@@ -509,7 +531,7 @@ def dataProcessTaiex():
         return None
 
     df = pd.read_pickle(dfPath)
-
+    openNp = df["open"].to_numpy(dtype=np.float64, copy=False)
     closeNp = df["close"].to_numpy(dtype=np.float64, copy=False)
     highNp = df["max"].to_numpy(dtype=np.float64, copy=False)
     lowNp = df["min"].to_numpy(dtype=np.float64, copy=False)
@@ -520,7 +542,10 @@ def dataProcessTaiex():
         "date": df["date"],
         "TAIEXvolume": df["Trading_Volume"].to_numpy(dtype=np.int32, copy=False),
         "TAIEXvolatility": features["volatility"],
+        "TAIEXopen": openNp.astype(np.float32, copy=False),
         "TAIEXclose": closeNp.astype(np.float32, copy=False),
+        "TAIEXmax": highNp.astype(np.float32, copy=False),
+        "TAIEXmin": lowNp.astype(np.float32, copy=False),
         "TAIEXroc5": features["roc5"],
         "TAIEXroc20": features["roc20"],
         "TAIEXma5": features["ma5"],

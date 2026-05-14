@@ -3,7 +3,7 @@ import pandas as pd
 from catboost import CatBoostClassifier, Pool
 from sklearn.metrics import classification_report, log_loss
 from sklearn.feature_selection import mutual_info_classif
-from dataProcess import purged_walk_forward
+from dataProcess import purgedWalkForward
 
 FEATURE_COLS = [
     # ── 個股特徵 ──
@@ -56,7 +56,7 @@ def train_with_purged_wf(df: pd.DataFrame,
     fold_reports = []
     models = []
 
-    for fold_i, (train_idx, test_idx) in enumerate(purged_walk_forward(clean_df, n_splits, max_hold_days, embargo_days)):
+    for fold_i, (train_idx, test_idx) in enumerate(purgedWalkForward(clean_df, n_splits, max_hold_days, embargo_days)):
         print(f"\n{'='*60}")
         print(f"Fold {fold_i + 1}/{n_splits}")
         print(f"  Train: {len(train_idx):,} 筆")
@@ -106,8 +106,8 @@ def train_with_purged_wf(df: pd.DataFrame,
             "train_size": len(train_idx),
             "test_size": len(test_idx),
             "log_loss": logloss,
-            "accuracy": report["accuracy"],
-            "f1_macro": report["macro avg"]["f1-score"],
+            "accuracy": report["accuracy"], # type: ignore
+            "f1_macro": report["macro avg"]["f1-score"], # type: ignore
         })
         models.append(model)
 
