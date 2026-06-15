@@ -134,3 +134,4 @@ if __name__ == "__main__":
     df['deltaRS_rank'] = df['deltaRS_rank'].ffill()
     df['deltaRS'] = df['deltaRS'].fillna(0)
     train_with_purged_wf(df, n_splits=5, max_hold_days=21, embargo_days=5)
+    
