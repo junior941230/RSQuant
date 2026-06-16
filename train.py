@@ -25,6 +25,7 @@ def prepare_data(df: pd.DataFrame):
     """移除 label 為 NaN 的行，回傳乾淨的 X, y"""
     clean = df.dropna(subset=[TARGET_COL]).copy()
     clean[TARGET_COL] = clean[TARGET_COL].astype(int)
+    clean = clean[clean[TARGET_COL] != 0].copy()
     X = clean[FEATURE_COLS]
     y = clean[TARGET_COL]
     return clean, X, y
@@ -86,9 +87,8 @@ def train_with_purged_wf(df: pd.DataFrame,
             learning_rate=0.05,
             depth=6,
             l2_leaf_reg=3,
-            auto_class_weights="Balanced",
-            loss_function="MultiClass",      # ✅ 新增這行，明確指定
-            eval_metric="TotalF1",           # ✅ 多元分類用 TotalF1，比 MultiClass loss 更直觀
+            loss_function="Logloss",
+            eval_metric="F1",
             early_stopping_rounds=50,
             random_seed=42,
             verbose=100,
@@ -101,7 +101,7 @@ def train_with_purged_wf(df: pd.DataFrame,
         y_prob = model.predict_proba(X_test)
 
         report = classification_report(y_test, y_pred, output_dict=True)
-        logloss = log_loss(y_test, y_prob, labels=[-1, 0, 1])
+        logloss = log_loss(y_test, y_prob, labels=[-1, 1])
 
         print(f"\n  Log Loss: {logloss:.4f}")
         print(classification_report(y_test, y_pred))
