@@ -41,7 +41,6 @@ def miAnalysis(X_train, y_train):
     mi = mutual_info_classif(X_train_for_mi, y_train, random_state=42)
     for col, score in zip(FEATURE_COLS, mi):
         print(f"  {col}: MI = {score:.4f}")
-    
 
 
 def train_with_purged_wf(df: pd.DataFrame,
@@ -56,7 +55,13 @@ def train_with_purged_wf(df: pd.DataFrame,
     fold_reports = []
     models = []
 
-    for fold_i, (train_idx, test_idx) in enumerate(purgedWalkForward(clean_df, n_splits, max_hold_days, embargo_days)):
+    folds = purgedWalkForward(
+        clean_df,
+        nSplits=n_splits,
+        maxHoldDays=max_hold_days,
+        embargoDays=embargo_days,
+    )
+    for fold_i, (train_idx, test_idx) in enumerate(folds):
         print(f"\n{'='*60}")
         print(f"Fold {fold_i + 1}/{n_splits}")
         print(f"  Train: {len(train_idx):,} 筆")
@@ -106,8 +111,8 @@ def train_with_purged_wf(df: pd.DataFrame,
             "train_size": len(train_idx),
             "test_size": len(test_idx),
             "log_loss": logloss,
-            "accuracy": report["accuracy"], # type: ignore
-            "f1_macro": report["macro avg"]["f1-score"], # type: ignore
+            "accuracy": report["accuracy"],  # type: ignore
+            "f1_macro": report["macro avg"]["f1-score"],  # type: ignore
         })
         models.append(model)
 
@@ -125,13 +130,9 @@ def train_with_purged_wf(df: pd.DataFrame,
 
 
 if __name__ == "__main__":
-    df = pd.read_pickle("cache/20260512_TrainingDataset.pkl")
+    df = pd.read_pickle("cache/20260616_TrainingDataset.pkl")
     df = df[df["date"] >= "2024-01-01"]
     df = df[df["rsRating"] >= 87]
     df = df[df["label"].notna()]
-    # 前向填充 rsRating 和 deltaRS 的 NaN 值
-    df['rsRating'] = df['rsRating'].ffill()
-    df['deltaRS_rank'] = df['deltaRS_rank'].ffill()
-    df['deltaRS'] = df['deltaRS'].fillna(0)
+    df = df[df["deltaRS"].notna()]
     train_with_purged_wf(df, n_splits=5, max_hold_days=21, embargo_days=5)
-    

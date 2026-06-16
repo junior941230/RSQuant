@@ -3,3 +3,5 @@ __pycache__/
 data/
 catboost_info/
 private.json
+tests/
+.pytest_cache/

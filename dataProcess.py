@@ -178,9 +178,9 @@ def _labelTriple(openArr, highArr, lowArr, atrArr, k, maxHoldDays):
     n = len(openArr)
     labels = np.full(n, -128, dtype=np.int8)
 
-    for i in range(n - maxHoldDays - 1):
+    for i in range(n - maxHoldDays):
         entry = openArr[i + 1]
-        atrVal = atrArr[i + 1]
+        atrVal = atrArr[i]
 
         if np.isnan(entry) or np.isnan(atrVal) or atrVal <= 0:
             continue
@@ -190,7 +190,7 @@ def _labelTriple(openArr, highArr, lowArr, atrArr, k, maxHoldDays):
         stopLoss = entry - r
         label = 0
 
-        for j in range(1, maxHoldDays + 1):
+        for j in range(maxHoldDays):
             idx = i + 1 + j
             h = highArr[idx]
             l = lowArr[idx]
@@ -268,10 +268,10 @@ def _labelTripleWithTaiex(pack, packTAIEX, atrArr, k, maxHoldDays):
     n = len(openArr)
     labels = np.full(n, -128, dtype=np.int8)
 
-    for i in range(n - maxHoldDays - 1):
+    for i in range(n - maxHoldDays):
         entry = openArr[i + 1]
         entryTaiex = openArrTaiex[i + 1]
-        atrVal = atrArr[i + 1]
+        atrVal = atrArr[i]
 
         if np.isnan(entry) or np.isnan(entryTaiex) or np.isnan(atrVal) or atrVal <= 0:
             continue
@@ -280,7 +280,7 @@ def _labelTripleWithTaiex(pack, packTAIEX, atrArr, k, maxHoldDays):
         Tp = 2.0 * k * (atrVal / entry)
         Sl = -k * (atrVal / entry)
 
-        for j in range(1, maxHoldDays + 1):
+        for j in range(maxHoldDays):
             idx = i + 1 + j
             # 改成：都用各自的進場點計算累積報酬
             cumStock_H = highArr[idx] / entry - 1.0
@@ -296,7 +296,7 @@ def _labelTripleWithTaiex(pack, packTAIEX, atrArr, k, maxHoldDays):
             # perTaiexOpen = openArrTaiex[idx] / entryTaiex
             # h = highArr[idx]
             # l = lowArr[idx]
-            
+
             # perH = h / entry
             # perL = l / entry
             # relativeH = perH - perTaiexOpen   # 個股 high 相對大盤當天 open
@@ -350,8 +350,23 @@ def labelSample(
     -------
     df:
         加上 label 欄位。
-        最後 maxHoldDays + 1 筆因無足夠未來資料設為 NA。
+        最後 maxHoldDays 筆因無足夠未來資料設為 NA。
     """
+
+    df = df.copy()
+    stockDates = pd.to_datetime(df["date"])
+    taiexColumns = [
+        "TAIEXopen",
+        "TAIEXmax",
+        "TAIEXmin",
+        "TAIEXclose",
+    ]
+    alignedTaiex = (
+        dataTaiex.assign(_dateKey=pd.to_datetime(dataTaiex["date"]))
+        .drop_duplicates("_dateKey", keep="last")
+        .set_index("_dateKey")
+        .reindex(stockDates)[taiexColumns]
+    )
 
     openArr = df["open"].to_numpy(dtype=np.float32)
     highArr = df["max"].to_numpy(dtype=np.float32)
@@ -359,10 +374,10 @@ def labelSample(
     atrArr = df["atr"].to_numpy(dtype=np.float32)
     pack = (openArr, highArr, lowArr)
 
-    taiexOpenArr = dataTaiex["TAIEXopen"].to_numpy(dtype=np.float32)
-    taiexMaxArr = dataTaiex["TAIEXmax"].to_numpy(dtype=np.float32)
-    taiexMinArr = dataTaiex["TAIEXmin"].to_numpy(dtype=np.float32)
-    closeArrTaiex = dataTaiex["TAIEXclose"].to_numpy(dtype=np.float32)
+    taiexOpenArr = alignedTaiex["TAIEXopen"].to_numpy(dtype=np.float32)
+    taiexMaxArr = alignedTaiex["TAIEXmax"].to_numpy(dtype=np.float32)
+    taiexMinArr = alignedTaiex["TAIEXmin"].to_numpy(dtype=np.float32)
+    closeArrTaiex = alignedTaiex["TAIEXclose"].to_numpy(dtype=np.float32)
     packTAIEX = (taiexOpenArr, taiexMaxArr, taiexMinArr, closeArrTaiex)
 
     labels = _labelTripleWithTaiex(
@@ -372,8 +387,6 @@ def labelSample(
         k,
         maxHoldDays
     )
-
-    df = df.copy()
 
     labelSeries = pd.array(labels, dtype=pd.Int8Dtype())
     labelSeries[labels == -128] = pd.NA
@@ -400,12 +413,10 @@ def dataProcess(dataTaiex, maxHoldDays: int = 63) -> pd.DataFrame:
 
         df = pd.read_pickle(entry.path)
         df = df[df["date"] >= "2020-01-01"]
+        df = df.sort_values("date", kind="mergesort").reset_index(drop=True)
 
         if len(df) <= 252:
             continue
-
-        if not df.index.is_monotonic_increasing:
-            df = df.sort_index()
 
         closeNp = df["close"].to_numpy(dtype=np.float64, copy=False)
         highNp = df["max"].to_numpy(dtype=np.float64, copy=False)
@@ -531,6 +542,7 @@ def dataProcessTaiex():
         return None
 
     df = pd.read_pickle(dfPath)
+    df = df.sort_values("date", kind="mergesort").reset_index(drop=True)
     openNp = df["open"].to_numpy(dtype=np.float64, copy=False)
     closeNp = df["close"].to_numpy(dtype=np.float64, copy=False)
     highNp = df["max"].to_numpy(dtype=np.float64, copy=False)
